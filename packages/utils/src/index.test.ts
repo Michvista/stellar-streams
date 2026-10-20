@@ -56,10 +56,7 @@ function parseCsv(csv: string): string[][] {
 
 describe('toCsv', () => {
   it('escapes commas, quotes, and newlines using RFC 4180 quoting', () => {
-    const csv = toCsv(
-      [{ label: 'A, B', note: 'Said "hello"\r\nnext line' }],
-      ['label', 'note'],
-    );
+    const csv = toCsv([{ label: 'A, B', note: 'Said "hello"\r\nnext line' }], ['label', 'note']);
 
     expect(csv).toBe('label,note\r\n"A, B","Said ""hello""\r\nnext line"');
   });
