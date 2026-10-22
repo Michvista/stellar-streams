@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { render, act, screen } from '@testing-library/react';
+import { render, act, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { WalletProvider, useWallet } from './WalletProvider';
 import * as freighter from '@stellar/freighter-api';
@@ -25,6 +25,23 @@ vi.mock('@albedo-link/intent', () => ({
   },
 }));
 
+// Ledger's device packages are imported dynamically by the adapter; mock them so
+// the provider test never needs a device (or WebHID).
+const ledgerMocks = vi.hoisted(() => {
+  const close = vi.fn(async () => {});
+  const create = vi.fn(async () => ({ close }));
+  return { close, create };
+});
+
+vi.mock('@ledgerhq/hw-transport-webhid', () => ({ default: { create: ledgerMocks.create } }));
+vi.mock('@ledgerhq/hw-app-str', () => ({
+  default: class MockStellarApp {
+    async getPublicKey() {
+      return { rawPublicKey: new Uint8Array(32).fill(1) };
+    }
+  },
+}));
+
 // Helper component to access useWallet hooks in tests
 function TestComponent() {
   const {
@@ -32,6 +49,7 @@ function TestComponent() {
     activeProvider,
     isConnected,
     isConnecting,
+    isRestoring,
     error,
     connect,
     disconnect,
@@ -39,6 +57,7 @@ function TestComponent() {
     signAuthEntry,
   } = useWallet();
   const [signError, setSignError] = useState('none');
+  const [signErrorName, setSignErrorName] = useState('none');
   const [authResult, setAuthResult] = useState('none');
   const [authError, setAuthError] = useState('none');
 
@@ -48,17 +67,25 @@ function TestComponent() {
       <div data-testid="provider">{activeProvider || 'null'}</div>
       <div data-testid="connected">{isConnected ? 'true' : 'false'}</div>
       <div data-testid="connecting">{isConnecting ? 'true' : 'false'}</div>
+      <div data-testid="restoring">{isRestoring ? 'true' : 'false'}</div>
       <div data-testid="error">{error || 'null'}</div>
       <div data-testid="sign-error">{signError}</div>
+      <div data-testid="sign-error-name">{signErrorName}</div>
       <div data-testid="auth-result">{authResult}</div>
       <div data-testid="auth-error">{authError}</div>
       <button onClick={() => connect('freighter').catch(() => {})}>Connect Freighter</button>
       <button onClick={() => connect('albedo').catch(() => {})}>Connect Albedo</button>
       <button onClick={() => connect('rabe').catch(() => {})}>Connect Rabet</button>
       <button onClick={() => connect('hana').catch(() => {})}>Connect Hana</button>
+      <button onClick={() => connect('ledger').catch(() => {})}>Connect Ledger</button>
       <button onClick={disconnect}>Disconnect</button>
       <button
-        onClick={() => signTransaction('mock-xdr').catch((err: Error) => setSignError(err.message))}
+        onClick={() =>
+          signTransaction('mock-xdr').catch((err: Error) => {
+            setSignError(err.message);
+            setSignErrorName(err.name);
+          })
+        }
       >
         Sign
       </button>
@@ -105,9 +132,10 @@ describe('WalletProvider', () => {
     expect(screen.getByTestId('address').textContent).toBe('null');
     expect(screen.getByTestId('provider').textContent).toBe('null');
     expect(screen.getByTestId('connected').textContent).toBe('false');
+    expect(screen.getByTestId('restoring').textContent).toBe('false');
   });
 
-  it('should auto-reconnect from localStorage on mount', () => {
+  it('should not report a stored session as connected until verified', async () => {
     localStorage.setItem('stellar_starter_kit_wallet_provider', 'freighter');
     localStorage.setItem('stellar_starter_kit_wallet_address', 'GA123...');
 
@@ -117,9 +145,94 @@ describe('WalletProvider', () => {
       </WalletProvider>,
     );
 
+    // While verification is pending the stored address must not be exposed.
+    expect(screen.getByTestId('connected').textContent).toBe('false');
+    expect(screen.getByTestId('restoring').textContent).toBe('true');
+  });
+
+  it('should auto-reconnect from localStorage after verifying the session', async () => {
+    vi.mocked(freighter.isConnected).mockResolvedValue({ isConnected: true });
+    vi.mocked(freighter.getAddress).mockResolvedValue({ address: 'GA123...' });
+
+    localStorage.setItem('stellar_starter_kit_wallet_provider', 'freighter');
+    localStorage.setItem('stellar_starter_kit_wallet_address', 'GA123...');
+
+    render(
+      <WalletProvider>
+        <TestComponent />
+      </WalletProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('connected').textContent).toBe('true');
+    });
+
     expect(screen.getByTestId('address').textContent).toBe('GA123...');
     expect(screen.getByTestId('provider').textContent).toBe('freighter');
-    expect(screen.getByTestId('connected').textContent).toBe('true');
+    expect(screen.getByTestId('restoring').textContent).toBe('false');
+  });
+
+  it('should clear the stored session when the extension is missing', async () => {
+    vi.mocked(freighter.isConnected).mockResolvedValue({ isConnected: false });
+
+    localStorage.setItem('stellar_starter_kit_wallet_provider', 'freighter');
+    localStorage.setItem('stellar_starter_kit_wallet_address', 'GA123...');
+
+    render(
+      <WalletProvider>
+        <TestComponent />
+      </WalletProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('connected').textContent).toBe('false');
+    });
+
+    expect(screen.getByTestId('address').textContent).toBe('null');
+    expect(screen.getByTestId('provider').textContent).toBe('null');
+    expect(localStorage.getItem('stellar_starter_kit_wallet_provider')).toBeNull();
+  });
+
+  it('should not report connected when the wallet is unavailable', async () => {
+    vi.mocked(freighter.isConnected).mockRejectedValue(new Error('network down'));
+
+    localStorage.setItem('stellar_starter_kit_wallet_provider', 'freighter');
+    localStorage.setItem('stellar_starter_kit_wallet_address', 'GA123...');
+
+    render(
+      <WalletProvider>
+        <TestComponent />
+      </WalletProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('connected').textContent).toBe('false');
+    });
+
+    expect(screen.getByTestId('address').textContent).toBe('null');
+    expect(screen.getByTestId('provider').textContent).toBe('null');
+  });
+
+  it('should invalidate a stored session whose address no longer matches', async () => {
+    vi.mocked(freighter.isConnected).mockResolvedValue({ isConnected: true });
+    vi.mocked(freighter.getAddress).mockResolvedValue({ address: 'GB_DIFFERENT' });
+
+    localStorage.setItem('stellar_starter_kit_wallet_provider', 'freighter');
+    localStorage.setItem('stellar_starter_kit_wallet_address', 'GA123...');
+
+    render(
+      <WalletProvider>
+        <TestComponent />
+      </WalletProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('connected').textContent).toBe('false');
+    });
+
+    expect(screen.getByTestId('address').textContent).toBe('null');
+    expect(screen.getByTestId('provider').textContent).toBe('null');
+    expect(localStorage.getItem('stellar_starter_kit_wallet_address')).toBeNull();
   });
 
   it('should connect to Freighter successfully', async () => {
@@ -206,6 +319,33 @@ describe('WalletProvider', () => {
     expect(screen.getByTestId('connected').textContent).toBe('true');
   });
 
+  it('should connect to Ledger and release the transport on disconnect', async () => {
+    Object.defineProperty(navigator, 'hid', { value: {}, configurable: true });
+
+    render(
+      <WalletProvider>
+        <TestComponent />
+      </WalletProvider>,
+    );
+
+    await act(async () => {
+      screen.getByText('Connect Ledger').click();
+    });
+
+    expect(screen.getByTestId('provider').textContent).toBe('ledger');
+    expect(screen.getByTestId('address').textContent).toMatch(/^G[A-Z0-9]{55}$/);
+    expect(localStorage.getItem('stellar_starter_kit_wallet_provider')).toBe('ledger');
+
+    await act(async () => {
+      screen.getByText('Disconnect').click();
+    });
+
+    expect(ledgerMocks.close).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('connected').textContent).toBe('false');
+
+    delete (navigator as Navigator & { hid?: unknown }).hid;
+  });
+
   it('should surface a missing Freighter extension without persisting a session', async () => {
     vi.mocked(freighter.isConnected).mockResolvedValue({ isConnected: false });
 
@@ -248,13 +388,18 @@ describe('WalletProvider', () => {
     localStorage.setItem('stellar_starter_kit_wallet_provider', 'freighter');
     localStorage.setItem('stellar_starter_kit_wallet_address', 'GA123...');
 
+    vi.mocked(freighter.isConnected).mockResolvedValue({ isConnected: true });
+    vi.mocked(freighter.getAddress).mockResolvedValue({ address: 'GA123...' });
+
     render(
       <WalletProvider>
         <TestComponent />
       </WalletProvider>,
     );
 
-    expect(screen.getByTestId('connected').textContent).toBe('true');
+    await waitFor(() => {
+      expect(screen.getByTestId('connected').textContent).toBe('true');
+    });
 
     await act(async () => {
       screen.getByText('Disconnect').click();
@@ -265,6 +410,35 @@ describe('WalletProvider', () => {
     expect(screen.getByTestId('connected').textContent).toBe('false');
     expect(localStorage.getItem('stellar_starter_kit_wallet_provider')).toBeNull();
     expect(localStorage.getItem('stellar_starter_kit_wallet_address')).toBeNull();
+  });
+
+  it('should end the Rabet extension session on disconnect', async () => {
+    const rabetDisconnect = vi.fn().mockResolvedValue(undefined);
+    (window as Window & { rabet?: unknown }).rabet = {
+      connect: vi.fn().mockResolvedValue({ publicKey: 'GB_RABET' }),
+      sign: vi.fn(),
+      disconnect: rabetDisconnect,
+    };
+
+    render(
+      <WalletProvider>
+        <TestComponent />
+      </WalletProvider>,
+    );
+
+    await act(async () => {
+      screen.getByText('Connect Rabet').click();
+    });
+
+    expect(screen.getByTestId('address').textContent).toBe('GB_RABET');
+
+    await act(async () => {
+      screen.getByText('Disconnect').click();
+    });
+
+    expect(rabetDisconnect).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('connected').textContent).toBe('false');
+    expect(localStorage.getItem('stellar_starter_kit_wallet_provider')).toBeNull();
   });
 
   it('should clear both storage keys and the error state on disconnect', async () => {
@@ -350,6 +524,58 @@ describe('WalletProvider', () => {
       expect.any(Error),
     );
     expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it('should surface a Rabet rejection as a typed rejection error', async () => {
+    (window as Window & { rabet?: unknown }).rabet = {
+      connect: vi.fn().mockResolvedValue({ publicKey: 'GB_RABET' }),
+      sign: vi.fn().mockRejectedValue({ error: 'User rejected the request.' }),
+    };
+
+    render(
+      <WalletProvider>
+        <TestComponent />
+      </WalletProvider>,
+    );
+
+    await act(async () => {
+      screen.getByText('Connect Rabet').click();
+    });
+
+    await act(async () => {
+      screen.getByText('Sign').click();
+    });
+
+    expect(screen.getByTestId('sign-error-name').textContent).toBe('WalletRejectedError');
+    expect(screen.getByTestId('sign-error').textContent).toBe('User rejected the request.');
+    expect(warnSpy).toHaveBeenCalledWith(
+      'transaction signing cancelled by user:',
+      expect.any(Error),
+    );
+  });
+
+  it('should surface a Rabet cancellation distinctly from a rejection', async () => {
+    (window as Window & { rabet?: unknown }).rabet = {
+      connect: vi.fn().mockResolvedValue({ publicKey: 'GB_RABET' }),
+      sign: vi.fn().mockRejectedValue(new Error('Request cancelled by the user.')),
+    };
+
+    render(
+      <WalletProvider>
+        <TestComponent />
+      </WalletProvider>,
+    );
+
+    await act(async () => {
+      screen.getByText('Connect Rabet').click();
+    });
+
+    await act(async () => {
+      screen.getByText('Sign').click();
+    });
+
+    expect(screen.getByTestId('sign-error-name').textContent).toBe('WalletCancelledError');
+    expect(screen.getByTestId('sign-error').textContent).toBe('Request cancelled by the user.');
   });
 
   it('should delegate signAuthEntry to Freighter', async () => {

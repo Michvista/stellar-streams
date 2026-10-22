@@ -94,7 +94,7 @@ dashboard footer shows the version next to the network name.
 | `types`     | `Stream`, `StreamConfig`, `CreateStreamParams`, status derivation.                                                              |
 | `utils`     | BigInt stroop formatting/parsing, duration formatting, vesting math.                                                            |
 | `hooks`     | [`useStream` + `useStellarNetworkStatus`](packages/hooks/README.md) — loads a stream + claimable balance with optional polling. |
-| `wallets`   | Unified React context over Freighter, Albedo, Rabet, and Hana.                                                                  |
+| `wallets`   | Unified React context over Freighter, Albedo, Rabet, Hana, and Ledger.                                                          |
 | `ui`        | Shared UI primitives and the Tailwind class helper.                                                                             |
 | `contracts` | Generated Soroban TypeScript bindings plus network constants.                                                                   |
 
